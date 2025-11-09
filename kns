@@ -68,10 +68,117 @@ local CACHE_UPDATE_INTERVAL = 10
 -- Store original positions for models that need to return
 local originalModelPositions = {}
 
+-- Store highlights
+local activeHighlights = {}
+
 -- Anti-AFK variables
 local antiAfkConnection = nil
 local lastAntiAfkAction = 0
 local ANTI_AFK_INTERVAL = 20 -- Perform anti-afk action every 20 seconds
+
+-- Function to highlight objects
+function highlightObject(object, objectType)
+    if not highlightEnabled then return end
+    if not object or not object.Parent then return end
+    
+    -- Remove existing highlight if any
+    if activeHighlights[object] then
+        activeHighlights[object]:Destroy()
+        activeHighlights[object] = nil
+    end
+    
+    pcall(function()
+        local highlight = Instance.new("Highlight")
+        highlight.Name = "ObjectHighlighter"
+        
+        -- Set color based on object type
+        if objectType == 1 then -- Money
+            highlight.FillColor = Color3.fromRGB(255, 255, 0) -- Yellow
+            highlight.OutlineColor = Color3.fromRGB(255, 200, 0)
+        elseif objectType == 2 then -- Crates
+            highlight.FillColor = Color3.fromRGB(150, 75, 0) -- Brown
+            highlight.OutlineColor = Color3.fromRGB(200, 100, 0)
+        elseif objectType == 3 then -- Metal Crates
+            highlight.FillColor = Color3.fromRGB(100, 100, 100) -- Gray
+            highlight.OutlineColor = Color3.fromRGB(150, 150, 150)
+        elseif objectType == 4 then -- Upgrade Station
+            highlight.FillColor = Color3.fromRGB(0, 150, 255) -- Blue
+            highlight.OutlineColor = Color3.fromRGB(0, 100, 200)
+        else
+            highlight.FillColor = Color3.fromRGB(0, 255, 0) -- Green (default)
+            highlight.OutlineColor = Color3.fromRGB(0, 200, 0)
+        end
+        
+        highlight.FillTransparency = 0.5
+        highlight.OutlineTransparency = 0
+        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        
+        -- Handle different object types
+        if object:IsA("Model") then
+            highlight.Adornee = object
+            highlight.Parent = object
+        else
+            highlight.Adornee = object
+            highlight.Parent = object
+        end
+        
+        activeHighlights[object] = highlight
+        
+        -- Auto-remove highlight after duration
+        task.delay(HIGHLIGHT_DURATION, function()
+            if highlight and highlight.Parent then
+                highlight:Destroy()
+                activeHighlights[object] = nil
+            end
+        end)
+        
+        print("🔦 Highlighted: " .. object.Name)
+    end)
+end
+
+-- Function to remove all highlights
+function clearAllHighlights()
+    for object, highlight in pairs(activeHighlights) do
+        if highlight and highlight.Parent then
+            highlight:Destroy()
+        end
+    end
+    activeHighlights = {}
+    print("🔦 All highlights cleared")
+end
+
+-- Function to update highlights based on settings
+function updateHighlights()
+    if not highlightEnabled then
+        clearAllHighlights()
+        return
+    end
+    
+    -- Highlight found objects
+    for object, _ in pairs(foundParts) do
+        if object and object.Parent then
+            highlightObject(object, 1)
+        end
+    end
+    
+    for object, _ in pairs(foundParts2) do
+        if object and object.Parent then
+            highlightObject(object, 2)
+        end
+    end
+    
+    for object, _ in pairs(foundModels) do
+        if object and object.Parent then
+            highlightObject(object, 3)
+        end
+    end
+    
+    for object, _ in pairs(foundModels2) do
+        if object and object.Parent then
+            highlightObject(object, 4)
+        end
+    end
+end
 
 -- Visual effects instead of sound
 function playVisualEffect()
@@ -115,7 +222,7 @@ function playUIEffect()
                 mainFrame.BackgroundColor3 = Color3.fromRGB(0, 100, 0)
                 
                 -- Return back after time
-                delay(0.3, function()
+                task.delay(0.3, function()
                     if mainFrame and mainFrame.Parent then
                         mainFrame.BackgroundColor3 = originalColor
                     end
@@ -632,38 +739,27 @@ function autoTeleportObjectsToPlayer()
     return teleportedCount > 0
 end
 
--- Main auto-functions loop
-function autoFunctionsLoop()
-    while true do
-        if autoTpEnabled or autoClickEnabled then
-            pcall(function()
-                if autoTpEnabled then
-                    autoTeleportObjectsToPlayer()
-                end
-                if autoClickEnabled then
-                    autoClickObjects()
-                end
-            end)
-        end
-        task.wait(0.5) -- Check every 0.5 seconds
-    end
-end
-
 -- Function to search for objects
 function searchForObjects()
     if isSearching then return end
     isSearching = true
     
     pcall(function()
+        -- Clear previous found objects
+        local tempFoundParts = {}
+        local tempFoundParts2 = {}
+        local tempFoundModels = {}
+        local tempFoundModels2 = {}
+        
         -- Search for parts
         for _, part in pairs(Workspace:GetDescendants()) do
             if part:IsA("Part") then
                 local partNameLower = string.lower(part.Name)
                 
                 if partNameLower == targetLower then
-                    foundParts[part] = true
+                    tempFoundParts[part] = true
                 elseif targetLower2 and partNameLower == targetLower2 then
-                    foundParts2[part] = true
+                    tempFoundParts2[part] = true
                 end
             end
         end
@@ -674,12 +770,22 @@ function searchForObjects()
                 local modelNameLower = string.lower(model.Name)
                 
                 if targetModelLower and modelNameLower == targetModelLower then
-                    foundModels[model] = true
+                    tempFoundModels[model] = true
                 elseif targetModelLower2 and modelNameLower == targetModelLower2 then
-                    foundModels2[model] = true
+                    tempFoundModels2[model] = true
                 end
             end
         end
+        
+        -- Update the main tables
+        foundParts = tempFoundParts
+        foundParts2 = tempFoundParts2
+        foundModels = tempFoundModels
+        foundModels2 = tempFoundModels2
+        
+        -- Update highlights
+        updateHighlights()
+        
     end)
     
     isSearching = false
@@ -710,6 +816,7 @@ function clearFoundObjects()
     modelCache = {}
     modelCache2 = {}
     cacheLastUpdate = 0
+    clearAllHighlights()
     createQuickNotification("🗑️ Cache cleared!", 1.5)
 end
 
@@ -828,6 +935,23 @@ function setupCharacterEvents()
         character:WaitForChild("HumanoidRootPart")
         createQuickNotification("👤 Character loaded!", 1.5)
     end)
+end
+
+-- Main auto-functions loop
+function autoFunctionsLoop()
+    while true do
+        if autoTpEnabled or autoClickEnabled then
+            pcall(function()
+                if autoTpEnabled then
+                    autoTeleportObjectsToPlayer()
+                end
+                if autoClickEnabled then
+                    autoClickObjects()
+                end
+            end)
+        end
+        task.wait(0.5) -- Check every 0.5 seconds
+    end
 end
 
 -- Function for creating GUI
@@ -1325,7 +1449,13 @@ function createControlGUI()
     highlightToggleBtn.MouseButton1Click:Connect(function()
         highlightEnabled = not highlightEnabled
         updateSettingsButtons()
-        createQuickNotification("🔦 Highlight: " .. (highlightEnabled and "ON" or "OFF"), 1.5)
+        if highlightEnabled then
+            updateHighlights()
+            createQuickNotification("🔦 Highlight: ON", 1.5)
+        else
+            clearAllHighlights()
+            createQuickNotification("🔦 Highlight: OFF", 1.5)
+        end
     end)
     
     notifyToggleBtn.MouseButton1Click:Connect(function()
@@ -1435,7 +1565,13 @@ game:GetService("Players").LocalPlayer.Chatted:Connect(function(message)
         createQuickNotification("⚡ Flash Effects: " .. (flashEffectsEnabled and "ON" or "OFF"), 1.5)
     elseif msg == "/togglehighlight" then
         highlightEnabled = not highlightEnabled
-        createQuickNotification("🔦 Highlight: " .. (highlightEnabled and "ON" or "OFF"), 1.5)
+        if highlightEnabled then
+            updateHighlights()
+            createQuickNotification("🔦 Highlight: ON", 1.5)
+        else
+            clearAllHighlights()
+            createQuickNotification("🔦 Highlight: OFF", 1.5)
+        end
     elseif msg == "/togglenotify" then
         notificationsEnabled = not notificationsEnabled
         createQuickNotification("📢 Notifications: " .. (notificationsEnabled and "ON" or "OFF"), 1.5)
