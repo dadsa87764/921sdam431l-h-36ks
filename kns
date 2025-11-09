@@ -1,0 +1,1477 @@
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- SETTINGS --
+local TARGET_PART_NAME = "CashDrop" 
+local TARGET_PART_NAME2 = "WoodCrate" 
+local TARGET_MODEL_NAME = "Crate" 
+local TARGET_MODEL_NAME2 = "UpgradeStation" 
+local CHECK_INTERVAL = 3
+local NOTIFICATION_DURATION = 2 
+local SEARCH_RADIUS = 2500
+local HIGHLIGHT_DURATION = 35
+local AUTO_CLEAR_CACHE_DELAY = 10
+local MODEL_RETURN_DELAY = 30
+------------------------
+
+-- Tables for tracking found objects
+local foundParts = {}
+local foundParts2 = {}
+local foundModels = {}
+local foundModels2 = {}
+local lastFoundObjects = {part1 = nil, part2 = nil, model = nil, model2 = nil}
+local isSearching = false
+local targetLower = string.lower(TARGET_PART_NAME)
+local targetLower2 = TARGET_PART_NAME2 ~= "" and string.lower(TARGET_PART_NAME2) or nil
+local targetModelLower = TARGET_MODEL_NAME ~= "" and string.lower(TARGET_MODEL_NAME) or nil
+local targetModelLower2 = TARGET_MODEL_NAME2 ~= "" and string.lower(TARGET_MODEL_NAME2) or nil
+
+-- Variables for GUI
+local controlGui = nil
+local isDragging = false
+local lastPartFoundTime = 0
+
+-- Variables for auto-functions
+local autoTpEnabled = false
+local autoClickEnabled = false
+local autoTpCooldown = 2 
+local autoClickCooldown = 1 
+local lastAutoTpTime = 0
+local lastAutoClickTime = 0
+
+-- NEW SETTINGS --
+local flashEffectsEnabled = true
+local highlightEnabled = true
+local notificationsEnabled = true
+local autoBringMoney = true
+local autoBringCrates = true
+local autoBringModels = true
+local autoBringModels2 = true
+local antiAfkEnabled = false -- NEW: Anti-AFK setting
+------------------------
+
+-- Cache for objects
+local objectCache = {}
+local objectCache2 = {}
+local modelCache = {}
+local modelCache2 = {}
+local cacheLastUpdate = 0
+local CACHE_UPDATE_INTERVAL = 10
+
+-- Store original positions for models that need to return
+local originalModelPositions = {}
+
+-- Anti-AFK variables
+local antiAfkConnection = nil
+local lastAntiAfkAction = 0
+local ANTI_AFK_INTERVAL = 20 -- Perform anti-afk action every 20 seconds
+
+-- Visual effects instead of sound
+function playVisualEffect()
+    if not flashEffectsEnabled then return end
+    
+    pcall(function()
+        -- Effect: Screen flash
+        local flashGui = Instance.new("ScreenGui")
+        flashGui.Name = "FlashEffect"
+        flashGui.Parent = playerGui
+        
+        local flashFrame = Instance.new("Frame")
+        flashFrame.Size = UDim2.new(1, 0, 1, 0)
+        flashFrame.Position = UDim2.new(0, 0, 0, 0)
+        flashFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 0) -- Yellow color
+        flashFrame.BackgroundTransparency = 0.9 -- Almost transparent
+        flashFrame.BorderSizePixel = 0
+        flashFrame.Parent = flashGui
+        
+        -- Blink animation
+        local tweenOut = TweenService:Create(flashFrame, TweenInfo.new(0.4), {
+            BackgroundTransparency = 1
+        })
+        
+        tweenOut:Play()
+        tweenOut.Completed:Connect(function()
+            flashGui:Destroy()
+        end)
+    end)
+end
+
+-- Effect: Interface color change
+function playUIEffect()
+    pcall(function()
+        if controlGui then
+            local mainFrame = controlGui:FindFirstChild("MainFrame")
+            if mainFrame then
+                local originalColor = mainFrame.BackgroundColor3
+                
+                -- Change to green
+                mainFrame.BackgroundColor3 = Color3.fromRGB(0, 100, 0)
+                
+                -- Return back after time
+                delay(0.3, function()
+                    if mainFrame and mainFrame.Parent then
+                        mainFrame.BackgroundColor3 = originalColor
+                    end
+                end)
+            end
+        end
+    end)
+end
+
+-- Combined visual effect (no text)
+function playFoundEffect()
+    playVisualEffect()
+    playUIEffect()
+end
+
+-- Function for quick notifications
+function createQuickNotification(message, duration)
+    if not notificationsEnabled then return end
+    
+    duration = duration or NOTIFICATION_DURATION
+    
+    local oldGui = playerGui:FindFirstChild("QuickNotifier")
+    if oldGui then
+        oldGui:Destroy()
+    end
+    
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "QuickNotifier"
+    screenGui.Parent = playerGui
+    
+    -- Compact size for quick notifications
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 200, 0, 40)
+    frame.Position = UDim2.new(0.5, -100, 0.1, 0)
+    frame.AnchorPoint = Vector2.new(0.5, 0)
+    frame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    frame.BorderSizePixel = 0
+    frame.BackgroundTransparency = 0.1
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = frame
+    
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(0, 150, 255)
+    stroke.Thickness = 2
+    stroke.Parent = frame
+    
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -10, 1, -10)
+    label.Position = UDim2.new(0, 5, 0, 5)
+    label.BackgroundTransparency = 1
+    label.Text = message
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextScaled = true
+    label.Font = Enum.Font.GothamBold
+    label.TextWrapped = true
+    label.Parent = frame
+    
+    frame.Parent = screenGui
+    
+    -- Appearance animation
+    frame.Position = UDim2.new(0.5, -100, 0.05, 0)
+    local tweenIn = TweenService:Create(frame, TweenInfo.new(0.3), {
+        Position = UDim2.new(0.5, -100, 0.1, 0)
+    })
+    tweenIn:Play()
+    
+    -- Quick removal
+    task.delay(duration, function()
+        if screenGui and screenGui.Parent then
+            local tweenOut = TweenService:Create(frame, TweenInfo.new(0.3), {
+                Position = UDim2.new(0.5, -100, 0.05, 0),
+                BackgroundTransparency = 1
+            })
+            tweenOut:Play()
+            tweenOut.Completed:Connect(function()
+                screenGui:Destroy()
+            end)
+        end
+    end)
+end
+
+-- NEW: Anti-AFK function
+function performAntiAfkAction()
+    if not antiAfkEnabled then return end
+    
+    local currentTime = tick()
+    if currentTime - lastAntiAfkAction < ANTI_AFK_INTERVAL then return end
+    
+    lastAntiAfkAction = currentTime
+    
+    pcall(function()
+        local character = player.Character
+        if character then
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                -- Rotate character slightly to prevent AFK detection
+                local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+                if humanoidRootPart then
+                    -- Small rotation to simulate player activity
+                    local currentCFrame = humanoidRootPart.CFrame
+                    humanoidRootPart.CFrame = currentCFrame * CFrame.Angles(0, math.rad(5), 0)
+                    
+                    -- Wait a bit and rotate back
+                    task.wait(0.5)
+                    humanoidRootPart.CFrame = currentCFrame * CFrame.Angles(0, math.rad(-5), 0)
+                    
+                    print("🔄 Anti-AFK: Performed rotation action")
+                end
+            end
+        end
+    end)
+end
+
+-- NEW: Start/Stop Anti-AFK function
+function toggleAntiAfk()
+    if antiAfkEnabled then
+        -- Stop anti-afk
+        if antiAfkConnection then
+            antiAfkConnection:Disconnect()
+            antiAfkConnection = nil
+        end
+        antiAfkEnabled = false
+        createQuickNotification("🔴 Anti-AFK: DISABLED", 2)
+        print("🔴 Anti-AFK disabled")
+    else
+        -- Start anti-afk
+        antiAfkEnabled = true
+        lastAntiAfkAction = tick()
+        
+        -- Create anti-afk loop
+        antiAfkConnection = RunService.Heartbeat:Connect(function()
+            performAntiAfkAction()
+        end)
+        
+        createQuickNotification("🟢 Anti-AFK: ENABLED", 2)
+        print("🟢 Anti-AFK enabled")
+    end
+end
+
+-- Function for clicking objects (no notification)
+function clickObject(object)
+    pcall(function()
+        -- Check if object has clickable properties
+        if object:IsA("Model") then
+            -- Search for clickable objects in the model
+            for _, child in pairs(object:GetDescendants()) do
+                if child:IsA("ClickDetector") then
+                    fireclickdetector(child)
+                    print("🖱️ Clicked model: " .. object.Name)
+                    return true
+                elseif child:IsA("ProximityPrompt") then
+                    local prompt = child
+                    prompt:InputHoldBegin()
+                    task.wait(0.1)
+                    prompt:InputHoldEnd()
+                    print("🖱️ Activated crates prompt: " .. object.Name)
+                    return true
+                end
+            end
+        else
+            -- It's a part
+            if object:FindFirstChild("ClickDetector") then
+                local clickDetector = object.ClickDetector
+                fireclickdetector(clickDetector)
+                print("🖱️ Clicked part: " .. object.Name)
+                return true
+            elseif object:FindFirstChild("ProximityPrompt") then
+                local prompt = object.ProximityPrompt
+                prompt:InputHoldBegin()
+                task.wait(0.1)
+                prompt:InputHoldEnd()
+                print("🖱️ Activated prompt: " .. object.Name)
+                return true
+            else
+                -- Try to find any clickable object in the part
+                for _, child in pairs(object:GetDescendants()) do
+                    if child:IsA("ClickDetector") then
+                        fireclickdetector(child)
+                        print("🖱️ Clicked child detector: " .. object.Name)
+                        return true
+                    elseif child:IsA("ProximityPrompt") then
+                        local prompt = child
+                        prompt:InputHoldBegin()
+                        task.wait(0.1)
+                        prompt:InputHoldEnd()
+                        print("🖱️ Activated child prompt: " .. object.Name)
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end)
+end
+
+-- Auto-click function
+function autoClickObjects()
+    if not autoClickEnabled then return end
+    
+    local currentTime = tick()
+    if currentTime - lastAutoClickTime < autoClickCooldown then return end
+    
+    lastAutoClickTime = currentTime
+    
+    -- Click all found objects in radius
+    local clickedCount = 0
+    
+    for object, _ in pairs(foundParts) do
+        if object and object.Parent then
+            local character = player.Character
+            if character then
+                local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+                if humanoidRootPart then
+                    local distance = (getObjectPosition(object) - humanoidRootPart.Position).Magnitude
+                    if distance <= 20 then -- Click only if close
+                        if clickObject(object) then
+                            clickedCount = clickedCount + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    for object, _ in pairs(foundParts2) do
+        if object and object.Parent then
+            local character = player.Character
+            if character then
+                local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+                if humanoidRootPart then
+                    local distance = (getObjectPosition(object) - humanoidRootPart.Position).Magnitude
+                    if distance <= 20 then -- Click only if close
+                        if clickObject(object) then
+                            clickedCount = clickedCount + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    for object, _ in pairs(foundModels) do
+        if object and object.Parent then
+            local character = player.Character
+            if character then
+                local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+                if humanoidRootPart then
+                    local distance = (getObjectPosition(object) - humanoidRootPart.Position).Magnitude
+                    if distance <= 20 then -- Click only if close
+                        if clickObject(object) then
+                            clickedCount = clickedCount + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    for object, _ in pairs(foundModels2) do
+        if object and object.Parent then
+            local character = player.Character
+            if character then
+                local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+                if humanoidRootPart then
+                    local distance = (getObjectPosition(object) - humanoidRootPart.Position).Magnitude
+                    if distance <= 20 then -- Click only if close
+                        if clickObject(object) then
+                            clickedCount = clickedCount + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    if clickedCount > 0 then
+        print("🖱️ Auto-clicked " .. clickedCount .. " objects")
+    end
+end
+
+-- Function to get object position (works for both parts and models)
+function getObjectPosition(object)
+    if object:IsA("Model") then
+        local primaryPart = object.PrimaryPart
+        if primaryPart then
+            return primaryPart.Position
+        else
+            -- Find the first part in the model
+            for _, part in pairs(object:GetChildren()) do
+                if part:IsA("BasePart") then
+                    return part.Position
+                end
+            end
+        end
+    else
+        -- It's a part
+        return object.Position
+    end
+    return Vector3.new(0, 0, 0)
+end
+
+-- Function to store original position of model
+function storeOriginalPosition(model)
+    if not model or not model.Parent then return end
+    
+    local modelPosition = getObjectPosition(model)
+    originalModelPositions[model] = modelPosition
+    
+    print("📦 Stored original position for: " .. model.Name)
+end
+
+-- Function to return model to original position
+function returnModelToOriginalPosition(model)
+    if not model or not model.Parent then return end
+    
+    local originalPosition = originalModelPositions[model]
+    if originalPosition then
+        if model:IsA("Model") then
+            local modelCFrame = model:GetPivot()
+            local offset = originalPosition - modelCFrame.Position
+            model:PivotTo(CFrame.new(modelCFrame.Position + offset))
+        else
+            model.Position = originalPosition
+        end
+        
+        createQuickNotification("🔄 " .. model.Name .. " returned to original position", 3)
+        print("🔄 Returned " .. model.Name .. " to original position")
+    end
+end
+
+-- Function for teleporting objects to player (no notification)
+function teleportObjectToPlayer(object, objectType)
+    if not object or not object.Parent then
+        return false
+    end
+    
+    local character = player.Character
+    if not character then
+        return false
+    end
+    
+    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then
+        return false
+    end
+    
+    local playerPosition = humanoidRootPart.Position
+    local lookVector = humanoidRootPart.CFrame.LookVector
+    local rightVector = humanoidRootPart.CFrame.RightVector
+    
+    -- Position in front of player with small offset depending on type
+    local offsetDistance = 8
+    local sideOffset = 0
+    
+    if objectType == 1 then
+        sideOffset = -4
+    elseif objectType == 2 then
+        sideOffset = -1
+    elseif objectType == 3 then
+        sideOffset = 2
+    elseif objectType == 4 then
+        sideOffset = 5
+    end
+    
+    local targetPosition = playerPosition + lookVector * offsetDistance + rightVector * sideOffset
+    
+    -- Find ground under target position
+    local rayOrigin = Vector3.new(targetPosition.X, targetPosition.Y + 10, targetPosition.Z)
+    local rayDirection = Vector3.new(0, -50, 0)
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.FilterDescendantsInstances = {character, object}
+    
+    local raycastResult = Workspace:Raycast(rayOrigin, rayDirection, raycastParams)
+    local groundHeight = targetPosition.Y
+    
+    if raycastResult then
+        groundHeight = raycastResult.Position.Y
+    end
+    
+    -- Store original position for UpgradeStation before teleporting
+    if objectType == 4 and object:IsA("Model") then
+        storeOriginalPosition(object)
+    end
+    
+    -- Handle teleportation based on object type
+    if object:IsA("Model") then
+        -- For models, move the entire model
+        local modelCFrame = object:GetPivot()
+        local offset = targetPosition - modelCFrame.Position
+        object:PivotTo(CFrame.new(modelCFrame.Position + offset))
+        
+        print("🚀 Teleported model: " .. object.Name)
+        
+        -- Schedule return for UpgradeStation
+        if objectType == 4 then
+            task.delay(MODEL_RETURN_DELAY, function()
+                if object and object.Parent then
+                    returnModelToOriginalPosition(object)
+                end
+            end)
+            createQuickNotification("🔄 " .. object.Name .. " will return in 30 seconds", 3)
+        end
+    else
+        -- For parts, move the part directly
+        local originalAnchored = object.Anchored
+        local originalCanCollide = object.CanCollide
+        
+        object.Anchored = true
+        object.CanCollide = false
+        
+        local objectSize = object.Size
+        local finalPosition = Vector3.new(
+            targetPosition.X,
+            groundHeight + (objectSize.Y / 2),
+            targetPosition.Z
+        )
+        
+        object.Position = finalPosition
+        
+        -- Return original properties after some time
+        task.delay(3, function()
+            if object and object.Parent then
+                if not originalAnchored then
+                    object.Anchored = false
+                end
+                object.CanCollide = originalCanCollide
+            end
+        end)
+        
+        print("🚀 Teleported part: " .. object.Name)
+    end
+    
+    return true
+end
+
+-- Auto-teleport objects to player function
+function autoTeleportObjectsToPlayer()
+    if not autoTpEnabled then return end
+    
+    local currentTime = tick()
+    if currentTime - lastAutoTpTime < autoTpCooldown then return end
+    
+    lastAutoTpTime = currentTime
+    
+    local character = player.Character
+    if not character then return end
+    
+    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then return end
+    
+    local playerPosition = humanoidRootPart.Position
+    local teleportedCount = 0
+    
+    -- Teleport all found objects in radius based on settings
+    if autoBringMoney then
+        for object, _ in pairs(foundParts) do
+            if object and object.Parent then
+                local distance = (getObjectPosition(object) - playerPosition).Magnitude
+                if distance <= SEARCH_RADIUS then
+                    if teleportObjectToPlayer(object, 1) then
+                        teleportedCount = teleportedCount + 1
+                    end
+                end
+            end
+        end
+    end
+    
+    if autoBringCrates then
+        for object, _ in pairs(foundParts2) do
+            if object and object.Parent then
+                local distance = (getObjectPosition(object) - playerPosition).Magnitude
+                if distance <= SEARCH_RADIUS then
+                    if teleportObjectToPlayer(object, 2) then
+                        teleportedCount = teleportedCount + 1
+                    end
+                end
+            end
+        end
+    end
+    
+    if autoBringModels then
+        for object, _ in pairs(foundModels) do
+            if object and object.Parent then
+                local distance = (getObjectPosition(object) - playerPosition).Magnitude
+                if distance <= SEARCH_RADIUS then
+                    if teleportObjectToPlayer(object, 3) then
+                        teleportedCount = teleportedCount + 1
+                    end
+                end
+            end
+        end
+    end
+    
+    if autoBringModels2 then
+        for object, _ in pairs(foundModels2) do
+            if object and object.Parent then
+                local distance = (getObjectPosition(object) - playerPosition).Magnitude
+                if distance <= SEARCH_RADIUS then
+                    if teleportObjectToPlayer(object, 4) then
+                        teleportedCount = teleportedCount + 1
+                    end
+                end
+            end
+        end
+    end
+    
+    if teleportedCount > 0 then
+        print("🚀 Auto-teleported " .. teleportedCount .. " objects to player")
+    end
+    
+    return teleportedCount > 0
+end
+
+-- Main auto-functions loop
+function autoFunctionsLoop()
+    while true do
+        if autoTpEnabled or autoClickEnabled then
+            pcall(function()
+                if autoTpEnabled then
+                    autoTeleportObjectsToPlayer()
+                end
+                if autoClickEnabled then
+                    autoClickObjects()
+                end
+            end)
+        end
+        task.wait(0.5) -- Check every 0.5 seconds
+    end
+end
+
+-- Function to search for objects
+function searchForObjects()
+    if isSearching then return end
+    isSearching = true
+    
+    pcall(function()
+        -- Search for parts
+        for _, part in pairs(Workspace:GetDescendants()) do
+            if part:IsA("Part") then
+                local partNameLower = string.lower(part.Name)
+                
+                if partNameLower == targetLower then
+                    foundParts[part] = true
+                elseif targetLower2 and partNameLower == targetLower2 then
+                    foundParts2[part] = true
+                end
+            end
+        end
+        
+        -- Search for models
+        for _, model in pairs(Workspace:GetDescendants()) do
+            if model:IsA("Model") then
+                local modelNameLower = string.lower(model.Name)
+                
+                if targetModelLower and modelNameLower == targetModelLower then
+                    foundModels[model] = true
+                elseif targetModelLower2 and modelNameLower == targetModelLower2 then
+                    foundModels2[model] = true
+                end
+            end
+        end
+    end)
+    
+    isSearching = false
+end
+
+-- Manual check function
+function manualCheck()
+    searchForObjects()
+    
+    local totalFound = 0
+    for _ in pairs(foundParts) do totalFound = totalFound + 1 end
+    for _ in pairs(foundParts2) do totalFound = totalFound + 1 end
+    for _ in pairs(foundModels) do totalFound = totalFound + 1 end
+    for _ in pairs(foundModels2) do totalFound = totalFound + 1 end
+    
+    createQuickNotification("🔍 Found " .. totalFound .. " objects", 2)
+    return totalFound > 0
+end
+
+-- Clear found objects function
+function clearFoundObjects()
+    foundParts = {}
+    foundParts2 = {}
+    foundModels = {}
+    foundModels2 = {}
+    objectCache = {}
+    objectCache2 = {}
+    modelCache = {}
+    modelCache2 = {}
+    cacheLastUpdate = 0
+    createQuickNotification("🗑️ Cache cleared!", 1.5)
+end
+
+-- Individual bring functions
+function bringPart1ToMe()
+    local teleported = false
+    for object, _ in pairs(foundParts) do
+        if object and object.Parent then
+            teleportObjectToPlayer(object, 1)
+            teleported = true
+        end
+    end
+    return teleported
+end
+
+function bringPart2ToMe()
+    local teleported = false
+    for object, _ in pairs(foundParts2) do
+        if object and object.Parent then
+            teleportObjectToPlayer(object, 2)
+            teleported = true
+        end
+    end
+    return teleported
+end
+
+function bringModelToMe()
+    local teleported = false
+    for object, _ in pairs(foundModels) do
+        if object and object.Parent then
+            teleportObjectToPlayer(object, 3)
+            teleported = true
+        end
+    end
+    return teleported
+end
+
+function bringModel2ToMe()
+    local teleported = false
+    for object, _ in pairs(foundModels2) do
+        if object and object.Parent then
+            teleportObjectToPlayer(object, 4)
+            teleported = true
+        end
+    end
+    return teleported
+end
+
+function bringAllObjectsToMe()
+    local teleported = false
+    teleported = bringPart1ToMe() or teleported
+    teleported = bringPart2ToMe() or teleported
+    teleported = bringModelToMe() or teleported
+    teleported = bringModel2ToMe() or teleported
+    return teleported
+end
+
+-- Toggle GUI function
+function toggleGUI()
+    if controlGui and controlGui.Parent then
+        controlGui:Destroy()
+        controlGui = nil
+        createQuickNotification("📱 GUI Hidden", 1.5)
+    else
+        createControlGUI()
+        createQuickNotification("📱 GUI Shown", 1.5)
+    end
+end
+
+-- Enable dragging function
+function enableDragging(frame, dragHandle)
+    local dragStart = nil
+    local startPos = nil
+    
+    dragHandle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragStart = input.Position
+            startPos = frame.Position
+            isDragging = true
+        end
+    end)
+    
+    dragHandle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement and isDragging then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+    
+    dragHandle.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            isDragging = false
+        end
+    end)
+end
+
+-- Update object cache function
+function updateObjectCache()
+    searchForObjects()
+    cacheLastUpdate = tick()
+end
+
+-- Auto clear cache function
+function autoClearCache()
+    while true do
+        task.wait(AUTO_CLEAR_CACHE_DELAY)
+        if tick() - cacheLastUpdate > CACHE_UPDATE_INTERVAL then
+            updateObjectCache()
+        end
+    end
+end
+
+-- Setup character events function
+function setupCharacterEvents()
+    player.CharacterAdded:Connect(function(character)
+        character:WaitForChild("HumanoidRootPart")
+        createQuickNotification("👤 Character loaded!", 1.5)
+    end)
+end
+
+-- Function for creating GUI
+function createControlGUI()
+    local oldGui = playerGui:FindFirstChild("PartNotifierControls")
+    if oldGui then
+        oldGui:Destroy()
+    end
+    
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "PartNotifierControls"
+    screenGui.Parent = playerGui
+    controlGui = screenGui
+    
+    -- Main container - INCREASED SIZE for new button
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 320, 0, 450) -- Increased height for anti-afk button
+    mainFrame.Position = UDim2.new(0, 10, 0.3, 0)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    mainFrame.BackgroundTransparency = 0.05
+    mainFrame.BorderSizePixel = 0
+    
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = mainFrame
+    
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(0, 150, 255)
+    stroke.Thickness = 2
+    stroke.Parent = mainFrame
+    
+    -- Title bar for dragging
+    local titleBar = Instance.new("TextButton")
+    titleBar.Name = "TitleBar"
+    titleBar.Size = UDim2.new(1, 0, 0, 35) -- Increased height
+    titleBar.Position = UDim2.new(0, 0, 0, 0)
+    titleBar.BackgroundColor3 = Color3.fromRGB(0, 100, 200)
+    titleBar.BackgroundTransparency = 0
+    titleBar.BorderSizePixel = 0
+    titleBar.Text = ""
+    titleBar.AutoButtonColor = false
+    
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 8)
+    titleCorner.Parent = titleBar
+    
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -30, 1, 0)
+    title.Position = UDim2.new(0, 10, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "Kill Noobs Simulator V1.31"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 16 -- Increased text size
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = titleBar
+    
+    -- Close button
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 25, 0, 25) -- Increased size
+    closeBtn.Position = UDim2.new(1, -30, 0.5, -12)
+    closeBtn.AnchorPoint = Vector2.new(1, 0.5)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+    closeBtn.Text = "×"
+    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 18 -- Increased text size
+    closeBtn.Parent = titleBar
+    
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0, 5)
+    closeCorner.Parent = closeBtn
+    
+    titleBar.Parent = mainFrame
+    
+    -- Content area
+    local content = Instance.new("Frame")
+    content.Name = "Content"
+    content.Size = UDim2.new(1, 0, 1, -35)
+    content.Position = UDim2.new(0, 0, 0, 35)
+    content.BackgroundTransparency = 1
+    content.Parent = mainFrame
+    
+    -- Search button
+    local searchBtn = Instance.new("TextButton")
+    searchBtn.Size = UDim2.new(0.9, 0, 0, 32) -- Increased height
+    searchBtn.Position = UDim2.new(0.05, 0, 0.02, 0)
+    searchBtn.BackgroundColor3 = Color3.fromRGB(0, 120, 255)
+    searchBtn.Text = "🔍 SEARCH OBJECTS"
+    searchBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    searchBtn.Font = Enum.Font.GothamBold
+    searchBtn.TextSize = 14 -- Increased text size
+    searchBtn.Parent = content
+    
+    local searchCorner = Instance.new("UICorner")
+    searchCorner.CornerRadius = UDim.new(0, 6)
+    searchCorner.Parent = searchBtn
+    
+    -- Bring all objects to me button
+    local bringAllBtn = Instance.new("TextButton")
+    bringAllBtn.Size = UDim2.new(0.9, 0, 0, 30) -- Increased height
+    bringAllBtn.Position = UDim2.new(0.05, 0, 0.1, 0)
+    bringAllBtn.BackgroundColor3 = Color3.fromRGB(40, 180, 40)
+    bringAllBtn.Text = "🚀 BRING ALL TO ME"
+    bringAllBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    bringAllBtn.Font = Enum.Font.GothamBold
+    bringAllBtn.TextSize = 14 -- Increased text size
+    bringAllBtn.Parent = content
+    
+    local bringAllCorner = Instance.new("UICorner")
+    bringAllCorner.CornerRadius = UDim.new(0, 6)
+    bringAllCorner.Parent = bringAllBtn
+    
+    -- Individual type buttons - INCREASED SIZE AND TEXT
+    local bring1Btn = Instance.new("TextButton")
+    bring1Btn.Size = UDim2.new(0.43, 0, 0, 26) -- Increased height
+    bring1Btn.Position = UDim2.new(0.05, 0, 0.2, 0)
+    bring1Btn.BackgroundColor3 = Color3.fromRGB(255, 200, 0)
+    bring1Btn.Text = "💰 MONEY"
+    bring1Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    bring1Btn.Font = Enum.Font.GothamBold
+    bring1Btn.TextSize = 12 -- Increased text size
+    bring1Btn.Parent = content
+    
+    local bring1Corner = Instance.new("UICorner")
+    bring1Corner.CornerRadius = UDim.new(0, 5)
+    bring1Corner.Parent = bring1Btn
+    
+    local bring2Btn = Instance.new("TextButton")
+    bring2Btn.Size = UDim2.new(0.43, 0, 0, 26) -- Increased height
+    bring2Btn.Position = UDim2.new(0.52, 0, 0.2, 0)
+    bring2Btn.BackgroundColor3 = Color3.fromRGB(150, 75, 0)
+    bring2Btn.Text = "📦 CRATES"
+    bring2Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    bring2Btn.Font = Enum.Font.GothamBold
+    bring2Btn.TextSize = 12 -- Increased text size
+    bring2Btn.Parent = content
+    
+    local bring2Corner = Instance.new("UICorner")
+    bring2Corner.CornerRadius = UDim.new(0, 5)
+    bring2Corner.Parent = bring2Btn
+    
+    -- Model button 1
+    local bringModelBtn = Instance.new("TextButton")
+    bringModelBtn.Size = UDim2.new(0.43, 0, 0, 26) -- Increased height
+    bringModelBtn.Position = UDim2.new(0.05, 0, 0.28, 0)
+    bringModelBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 200)
+    bringModelBtn.Text = "🏢 METAL CRATES"
+    bringModelBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    bringModelBtn.Font = Enum.Font.GothamBold
+    bringModelBtn.TextSize = 10 -- Increased text size
+    bringModelBtn.Parent = content
+    
+    local bringModelCorner = Instance.new("UICorner")
+    bringModelCorner.CornerRadius = UDim.new(0, 5)
+    bringModelCorner.Parent = bringModelBtn
+    
+    -- NEW: Model button 2 (UpgradeStation)
+    local bringModel2Btn = Instance.new("TextButton")
+    bringModel2Btn.Size = UDim2.new(0.43, 0, 0, 26) -- Increased height
+    bringModel2Btn.Position = UDim2.new(0.52, 0, 0.28, 0)
+    bringModel2Btn.BackgroundColor3 = Color3.fromRGB(150, 0, 200)
+    bringModel2Btn.Text = "⚡ UPGRADE STATION"
+    bringModel2Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    bringModel2Btn.Font = Enum.Font.GothamBold
+    bringModel2Btn.TextSize = 9 -- Increased text size
+    bringModel2Btn.Parent = content
+    
+    local bringModel2Corner = Instance.new("UICorner")
+    bringModel2Corner.CornerRadius = UDim.new(0, 5)
+    bringModel2Corner.Parent = bringModel2Btn
+    
+    -- Auto-teleport objects to me button
+    local autoTpBtn = Instance.new("TextButton")
+    autoTpBtn.Size = UDim2.new(0.43, 0, 0, 24) -- Increased height
+    autoTpBtn.Position = UDim2.new(0.05, 0, 0.37, 0)
+    autoTpBtn.BackgroundColor3 = Color3.fromRGB(200, 100, 0)
+    autoTpBtn.Text = "🔁 AUTO-BRING: OFF"
+    autoTpBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    autoTpBtn.Font = Enum.Font.Gotham
+    autoTpBtn.TextSize = 10 -- Increased text size
+    autoTpBtn.Parent = content
+    
+    local autoTpCorner = Instance.new("UICorner")
+    autoTpCorner.CornerRadius = UDim.new(0, 5)
+    autoTpCorner.Parent = autoTpBtn
+    
+    -- Auto-click button
+    local autoClickBtn = Instance.new("TextButton")
+    autoClickBtn.Size = UDim2.new(0.43, 0, 0, 24) -- Increased height
+    autoClickBtn.Position = UDim2.new(0.52, 0, 0.37, 0)
+    autoClickBtn.BackgroundColor3 = Color3.fromRGB(150, 0, 150)
+    autoClickBtn.Text = "🖱️ AUTO-CLICK: OFF"
+    autoClickBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    autoClickBtn.Font = Enum.Font.Gotham
+    autoClickBtn.TextSize = 10 -- Increased text size
+    autoClickBtn.Parent = content
+    
+    local autoClickCorner = Instance.new("UICorner")
+    autoClickCorner.CornerRadius = UDim.new(0, 5)
+    autoClickCorner.Parent = autoClickBtn
+    
+    -- NEW: Anti-AFK button
+    local antiAfkBtn = Instance.new("TextButton")
+    antiAfkBtn.Size = UDim2.new(0.43, 0, 0, 24) -- Increased height
+    antiAfkBtn.Position = UDim2.new(0.05, 0, 0.45, 0)
+    antiAfkBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+    antiAfkBtn.Text = "🔄 ANTI-AFK: OFF"
+    antiAfkBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    antiAfkBtn.Font = Enum.Font.Gotham
+    antiAfkBtn.TextSize = 9 -- Increased text size
+    antiAfkBtn.Parent = content
+    
+    local antiAfkCorner = Instance.new("UICorner")
+    antiAfkCorner.CornerRadius = UDim.new(0, 5)
+    antiAfkCorner.Parent = antiAfkBtn
+    
+    -- Settings buttons - INCREASED SIZE AND TEXT
+    local flashToggleBtn = Instance.new("TextButton")
+    flashToggleBtn.Size = UDim2.new(0.43, 0, 0, 22) -- Increased height
+    flashToggleBtn.Position = UDim2.new(0.52, 0, 0.45, 0)
+    flashToggleBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 200)
+    flashToggleBtn.Text = "⚡ FLASH: ON"
+    flashToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    flashToggleBtn.Font = Enum.Font.Gotham
+    flashToggleBtn.TextSize = 9 -- Increased text size
+    flashToggleBtn.Parent = content
+    
+    local flashToggleCorner = Instance.new("UICorner")
+    flashToggleCorner.CornerRadius = UDim.new(0, 4)
+    flashToggleCorner.Parent = flashToggleBtn
+    
+    local highlightToggleBtn = Instance.new("TextButton")
+    highlightToggleBtn.Size = UDim2.new(0.43, 0, 0, 22) -- Increased height
+    highlightToggleBtn.Position = UDim2.new(0.05, 0, 0.52, 0)
+    highlightToggleBtn.BackgroundColor3 = Color3.fromRGB(100, 200, 100)
+    highlightToggleBtn.Text = "🔦 HIGHLIGHT: ON"
+    highlightToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    highlightToggleBtn.Font = Enum.Font.Gotham
+    highlightToggleBtn.TextSize = 9 -- Increased text size
+    highlightToggleBtn.Parent = content
+    
+    local highlightToggleCorner = Instance.new("UICorner")
+    highlightToggleCorner.CornerRadius = UDim.new(0, 4)
+    highlightToggleCorner.Parent = highlightToggleBtn
+    
+    local notifyToggleBtn = Instance.new("TextButton")
+    notifyToggleBtn.Size = UDim2.new(0.43, 0, 0, 22) -- Increased height
+    notifyToggleBtn.Position = UDim2.new(0.52, 0, 0.52, 0)
+    notifyToggleBtn.BackgroundColor3 = Color3.fromRGB(200, 150, 50)
+    notifyToggleBtn.Text = "📢 NOTIFY: ON"
+    notifyToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    notifyToggleBtn.Font = Enum.Font.Gotham
+    notifyToggleBtn.TextSize = 9 -- Increased text size
+    notifyToggleBtn.Parent = content
+    
+    local notifyToggleCorner = Instance.new("UICorner")
+    notifyToggleCorner.CornerRadius = UDim.new(0, 4)
+    notifyToggleCorner.Parent = notifyToggleBtn
+    
+    -- Auto-Bring Settings - INCREASED SIZE AND TEXT
+    local autoBringMoneyBtn = Instance.new("TextButton")
+    autoBringMoneyBtn.Size = UDim2.new(0.43, 0, 0, 22) -- Increased height
+    autoBringMoneyBtn.Position = UDim2.new(0.05, 0, 0.59, 0)
+    autoBringMoneyBtn.BackgroundColor3 = Color3.fromRGB(255, 200, 0)
+    autoBringMoneyBtn.Text = "💰 AUTO $: ON"
+    autoBringMoneyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    autoBringMoneyBtn.Font = Enum.Font.Gotham
+    autoBringMoneyBtn.TextSize = 9 -- Increased text size
+    autoBringMoneyBtn.Parent = content
+    
+    local autoBringMoneyCorner = Instance.new("UICorner")
+    autoBringMoneyCorner.CornerRadius = UDim.new(0, 4)
+    autoBringMoneyCorner.Parent = autoBringMoneyBtn
+    
+    local autoBringCratesBtn = Instance.new("TextButton")
+    autoBringCratesBtn.Size = UDim2.new(0.43, 0, 0, 22) -- Increased height
+    autoBringCratesBtn.Position = UDim2.new(0.52, 0, 0.59, 0)
+    autoBringCratesBtn.BackgroundColor3 = Color3.fromRGB(150, 75, 0)
+    autoBringCratesBtn.Text = "📦 AUTO 📦: ON"
+    autoBringCratesBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    autoBringCratesBtn.Font = Enum.Font.Gotham
+    autoBringCratesBtn.TextSize = 9 -- Increased text size
+    autoBringCratesBtn.Parent = content
+    
+    local autoBringCratesCorner = Instance.new("UICorner")
+    autoBringCratesCorner.CornerRadius = UDim.new(0, 4)
+    autoBringCratesCorner.Parent = autoBringCratesBtn
+    
+    local autoBringModelsBtn = Instance.new("TextButton")
+    autoBringModelsBtn.Size = UDim2.new(0.43, 0, 0, 22) -- Increased height
+    autoBringModelsBtn.Position = UDim2.new(0.05, 0, 0.66, 0)
+    autoBringModelsBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 200)
+    autoBringModelsBtn.Text = "🏢 AUTO 🏢: ON"
+    autoBringModelsBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    autoBringModelsBtn.Font = Enum.Font.Gotham
+    autoBringModelsBtn.TextSize = 9 -- Increased text size
+    autoBringModelsBtn.Parent = content
+    
+    local autoBringModelsCorner = Instance.new("UICorner")
+    autoBringModelsCorner.CornerRadius = UDim.new(0, 4)
+    autoBringModelsCorner.Parent = autoBringModelsBtn
+    
+    -- NEW: Auto-Bring Models2 button
+    local autoBringModels2Btn = Instance.new("TextButton")
+    autoBringModels2Btn.Size = UDim2.new(0.43, 0, 0, 22) -- Increased height
+    autoBringModels2Btn.Position = UDim2.new(0.52, 0, 0.66, 0)
+    autoBringModels2Btn.BackgroundColor3 = Color3.fromRGB(150, 0, 200)
+    autoBringModels2Btn.Text = "⚡ AUTO ⚡: ON"
+    autoBringModels2Btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    autoBringModels2Btn.Font = Enum.Font.Gotham
+    autoBringModels2Btn.TextSize = 9 -- Increased text size
+    autoBringModels2Btn.Parent = content
+    
+    local autoBringModels2Corner = Instance.new("UICorner")
+    autoBringModels2Corner.CornerRadius = UDim.new(0, 4)
+    autoBringModels2Corner.Parent = autoBringModels2Btn
+    
+    -- Clear button
+    local clearBtn = Instance.new("TextButton")
+    clearBtn.Size = UDim2.new(0.9, 0, 0, 26) -- Increased height
+    clearBtn.Position = UDim2.new(0.05, 0, 0.75, 0)
+    clearBtn.BackgroundColor3 = Color3.fromRGB(180, 60, 60)
+    clearBtn.Text = "🗑️ CLEAR CACHE"
+    clearBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    clearBtn.Font = Enum.Font.GothamBold
+    clearBtn.TextSize = 12 -- Increased text size
+    clearBtn.Parent = content
+    
+    local clearCorner = Instance.new("UICorner")
+    clearCorner.CornerRadius = UDim.new(0, 5)
+    clearCorner.Parent = clearBtn
+    
+    -- Effect test button
+    local effectTestBtn = Instance.new("TextButton")
+    effectTestBtn.Size = UDim2.new(0.9, 0, 0, 26) -- Increased height
+    effectTestBtn.Position = UDim2.new(0.05, 0, 0.84, 0)
+    effectTestBtn.BackgroundColor3 = Color3.fromRGB(200, 150, 0)
+    effectTestBtn.Text = "✨ TEST EFFECTS"
+    effectTestBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    effectTestBtn.Font = Enum.Font.GothamBold
+    effectTestBtn.TextSize = 12 -- Increased text size
+    effectTestBtn.Parent = content
+    
+    local effectTestCorner = Instance.new("UICorner")
+    effectTestCorner.CornerRadius = UDim.new(0, 5)
+    effectTestCorner.Parent = effectTestBtn
+    
+    -- Status with clear names
+    local target1Name = "💰 " .. TARGET_PART_NAME
+    local target2Name = TARGET_PART_NAME2 ~= "" and "📦 " .. TARGET_PART_NAME2 or "❌ Not set"
+    local targetModelName = TARGET_MODEL_NAME ~= "" and "🏢 " .. TARGET_MODEL_NAME or "❌ Not set"
+    local targetModel2Name = TARGET_MODEL_NAME2 ~= "" and "⚡ " .. TARGET_MODEL_NAME2 or "❌ Not set"
+    
+    local statusText = "🎯 TARGETS:\n" .. target1Name .. "\n" .. target2Name .. "\n" .. targetModelName .. "\n" .. targetModel2Name .. "\n\n⚡ SETTINGS\nFlash: " .. (flashEffectsEnabled and "ON" or "OFF") .. "\nHighlight: " .. (highlightEnabled and "ON" or "OFF") .. "\nNotify: " .. (notificationsEnabled and "ON" or "OFF") .. "\nAnti-AFK: " .. (antiAfkEnabled and "ON" or "OFF")
+    
+    local status = Instance.new("TextLabel")
+    status.Size = UDim2.new(1, -10, 0, 100)
+    status.Position = UDim2.new(0, 5, 0, 150)
+    status.BackgroundTransparency = 1
+    status.Text = statusText
+    status.TextColor3 = Color3.fromRGB(220, 220, 220)
+    status.TextSize = 10 -- Increased text size
+    status.Font = Enum.Font.Gotham
+    status.TextWrapped = true
+    status.TextXAlignment = Enum.TextXAlignment.Left
+    status.Parent = content
+    
+    -- Function for updating auto-function buttons
+    local function updateAutoButtons()
+        if autoTpEnabled then
+            autoTpBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+            autoTpBtn.Text = "🔁 AUTO-BRING: ON"
+        else
+            autoTpBtn.BackgroundColor3 = Color3.fromRGB(200, 100, 0)
+            autoTpBtn.Text = "🔁 AUTO-BRING: OFF"
+        end
+        
+        if autoClickEnabled then
+            autoClickBtn.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+            autoClickBtn.Text = "🖱️ AUTO-CLICK: ON"
+        else
+            autoClickBtn.BackgroundColor3 = Color3.fromRGB(150, 0, 150)
+            autoClickBtn.Text = "🖱️ AUTO-CLICK: OFF"
+        end
+    end
+    
+    -- Function for updating settings buttons
+    local function updateSettingsButtons()
+        flashToggleBtn.Text = "⚡ FLASH: " .. (flashEffectsEnabled and "ON" or "OFF")
+        flashToggleBtn.BackgroundColor3 = flashEffectsEnabled and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(200, 100, 100)
+        
+        highlightToggleBtn.Text = "🔦 HIGHLIGHT: " .. (highlightEnabled and "ON" or "OFF")
+        highlightToggleBtn.BackgroundColor3 = highlightEnabled and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(200, 100, 100)
+        
+        notifyToggleBtn.Text = "📢 NOTIFY: " .. (notificationsEnabled and "ON" or "OFF")
+        notifyToggleBtn.BackgroundColor3 = notificationsEnabled and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(200, 100, 100)
+        
+        antiAfkBtn.Text = "🔄 ANTI-AFK: " .. (antiAfkEnabled and "ON" or "OFF")
+        antiAfkBtn.BackgroundColor3 = antiAfkEnabled and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(200, 100, 100)
+        
+        autoBringMoneyBtn.Text = "💰 AUTO $: " .. (autoBringMoney and "ON" or "OFF")
+        autoBringMoneyBtn.BackgroundColor3 = autoBringMoney and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(200, 100, 100)
+        
+        autoBringCratesBtn.Text = "📦 AUTO 📦: " .. (autoBringCrates and "ON" or "OFF")
+        autoBringCratesBtn.BackgroundColor3 = autoBringCrates and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(200, 100, 100)
+        
+        autoBringModelsBtn.Text = "🏢 AUTO 🏢: " .. (autoBringModels and "ON" or "OFF")
+        autoBringModelsBtn.BackgroundColor3 = autoBringModels and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(200, 100, 100)
+        
+        autoBringModels2Btn.Text = "⚡ AUTO ⚡: " .. (autoBringModels2 and "ON" or "OFF")
+        autoBringModels2Btn.BackgroundColor3 = autoBringModels2 and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(200, 100, 100)
+        
+        -- Update status text
+        status.Text = "🎯 TARGETS:\n" .. target1Name .. "\n" .. target2Name .. "\n" .. targetModelName .. "\n" .. targetModel2Name .. "\n\n⚡ SETTINGS\nFlash: " .. (flashEffectsEnabled and "ON" or "OFF") .. "\nHighlight: " .. (highlightEnabled and "ON" or "OFF") .. "\nNotify: " .. (notificationsEnabled and "ON" or "OFF") .. "\nAnti-AFK: " .. (antiAfkEnabled and "ON" or "OFF")
+    end
+    
+    -- Event handlers
+    searchBtn.MouseButton1Click:Connect(function()
+        createQuickNotification("🔍 Searching for objects...", 1.5)
+        manualCheck()
+    end)
+    
+    bringAllBtn.MouseButton1Click:Connect(function()
+        local result = bringAllObjectsToMe()
+        if result then
+            createQuickNotification("✅ All objects brought to you!", 1.5)
+        else
+            createQuickNotification("❌ Objects not found", 1.5)
+        end
+    end)
+    
+    bring1Btn.MouseButton1Click:Connect(function()
+        local result = bringPart1ToMe()
+        if result then
+            createQuickNotification("💰 Money brought to you!", 1.5)
+        else
+            createQuickNotification("❌ Money not found", 1.5)
+        end
+    end)
+    
+    bring2Btn.MouseButton1Click:Connect(function()
+        local result = bringPart2ToMe()
+        if result then
+            createQuickNotification("📦 Crates brought to you!", 1.5)
+        else
+            createQuickNotification("❌ Crates not found", 1.5)
+        end
+    end)
+    
+    bringModelBtn.MouseButton1Click:Connect(function()
+        local result = bringModelToMe()
+        if result then
+            createQuickNotification("🏢 Metal Crates brought to you!", 1.5)
+        else
+            createQuickNotification("❌ Metal Crates not found", 1.5)
+        end
+    end)
+    
+    bringModel2Btn.MouseButton1Click:Connect(function()
+        local result = bringModel2ToMe()
+        if result then
+            createQuickNotification("⚡ Upgrade Station brought to you!\nWill return in 30 seconds", 3)
+        else
+            createQuickNotification("❌ Upgrade Station not found", 1.5)
+        end
+    end)
+    
+    autoTpBtn.MouseButton1Click:Connect(function()
+        autoTpEnabled = not autoTpEnabled
+        updateAutoButtons()
+        createQuickNotification("🔁 Auto-Bring: " .. (autoTpEnabled and "ON" or "OFF"), 1.5)
+    end)
+    
+    autoClickBtn.MouseButton1Click:Connect(function()
+        autoClickEnabled = not autoClickEnabled
+        updateAutoButtons()
+        createQuickNotification("🖱️ Auto-Click: " .. (autoClickEnabled and "ON" or "OFF"), 1.5)
+    end)
+    
+    -- NEW: Anti-AFK button handler
+    antiAfkBtn.MouseButton1Click:Connect(function()
+        toggleAntiAfk()
+        updateSettingsButtons()
+    end)
+    
+    -- Settings buttons
+    flashToggleBtn.MouseButton1Click:Connect(function()
+        flashEffectsEnabled = not flashEffectsEnabled
+        updateSettingsButtons()
+        createQuickNotification("⚡ Flash Effects: " .. (flashEffectsEnabled and "ON" or "OFF"), 1.5)
+    end)
+    
+    highlightToggleBtn.MouseButton1Click:Connect(function()
+        highlightEnabled = not highlightEnabled
+        updateSettingsButtons()
+        createQuickNotification("🔦 Highlight: " .. (highlightEnabled and "ON" or "OFF"), 1.5)
+    end)
+    
+    notifyToggleBtn.MouseButton1Click:Connect(function()
+        notificationsEnabled = not notificationsEnabled
+        updateSettingsButtons()
+        createQuickNotification("📢 Notifications: " .. (notificationsEnabled and "ON" or "OFF"), 1.5)
+    end)
+    
+    autoBringMoneyBtn.MouseButton1Click:Connect(function()
+        autoBringMoney = not autoBringMoney
+        updateSettingsButtons()
+        createQuickNotification("💰 Auto-Bring Money: " .. (autoBringMoney and "ON" or "OFF"), 1.5)
+    end)
+    
+    autoBringCratesBtn.MouseButton1Click:Connect(function()
+        autoBringCrates = not autoBringCrates
+        updateSettingsButtons()
+        createQuickNotification("📦 Auto-Bring Crates: " .. (autoBringCrates and "ON" or "OFF"), 1.5)
+    end)
+    
+    autoBringModelsBtn.MouseButton1Click:Connect(function()
+        autoBringModels = not autoBringModels
+        updateSettingsButtons()
+        createQuickNotification("🏢 Auto-Bring Metal Crates: " .. (autoBringModels and "ON" or "OFF"), 1.5)
+    end)
+    
+    autoBringModels2Btn.MouseButton1Click:Connect(function()
+        autoBringModels2 = not autoBringModels2
+        updateSettingsButtons()
+        createQuickNotification("⚡ Auto-Bring Upgrade Stations: " .. (autoBringModels2 and "ON" or "OFF"), 1.5)
+    end)
+    
+    clearBtn.MouseButton1Click:Connect(function()
+        clearFoundObjects()
+        createQuickNotification("🗑️ Cache cleared!", 1.5)
+    end)
+    
+    effectTestBtn.MouseButton1Click:Connect(function()
+        playFoundEffect()
+        createQuickNotification("✨ Testing effects!", 1.5)
+    end)
+    
+    closeBtn.MouseButton1Click:Connect(toggleGUI)
+    
+    -- Initialize buttons
+    updateAutoButtons()
+    updateSettingsButtons()
+    
+    -- Enable dragging
+    enableDragging(mainFrame, titleBar)
+    
+    mainFrame.Parent = screenGui
+    return screenGui
+end
+
+-- Chat commands (adding anti-afk command)
+game:GetService("Players").LocalPlayer.Chatted:Connect(function(message)
+    local msg = message:lower()
+    if msg == "/find" then
+        createQuickNotification("🔍 Searching for objects...", 1.5)
+        manualCheck()
+    elseif msg == "/clear" then
+        clearFoundObjects()
+        createQuickNotification("🗑️ Cache cleared!", 1.5)
+    elseif msg == "/bring" then
+        local result = bringAllObjectsToMe()
+        createQuickNotification(result and "✅ All objects brought to you!" or "❌ Objects not found", 1.5)
+    elseif msg == "/bring1" then
+        local result = bringPart1ToMe()
+        createQuickNotification(result and "💰 Money brought to you!" or "❌ Money not found", 1.5)
+    elseif msg == "/bring2" then
+        local result = bringPart2ToMe()
+        createQuickNotification(result and "📦 Crates brought to you!" or "❌ Crates not found", 1.5)
+    elseif msg == "/bringmodel" then
+        local result = bringModelToMe()
+        createQuickNotification(result and "🏢 Metal Crates brought to you!" or "❌ Metal Crates not found", 1.5)
+    elseif msg == "/bringmodel2" then
+        local result = bringModel2ToMe()
+        createQuickNotification(result and "⚡ Upgrade Station brought to you!\nWill return in 30 seconds" or "❌ Upgrade Station not found", 3)
+    elseif msg:sub(1, 9) == "/setparts" then
+        local parts = message:sub(11):split(",")
+        if #parts >= 1 then
+            TARGET_PART_NAME = parts[1]:gsub("^%s*(.-)%s*$", "%1")
+            TARGET_PART_NAME2 = parts[2] and parts[2]:gsub("^%s*(.-)%s*$", "%1") or ""
+            TARGET_MODEL_NAME = parts[3] and parts[3]:gsub("^%s*(.-)%s*$", "%1") or ""
+            TARGET_MODEL_NAME2 = parts[4] and parts[4]:gsub("^%s*(.-)%s*$", "%1") or ""
+            targetLower = string.lower(TARGET_PART_NAME)
+            targetLower2 = TARGET_PART_NAME2 ~= "" and string.lower(TARGET_PART_NAME2) or nil
+            targetModelLower = TARGET_MODEL_NAME ~= "" and string.lower(TARGET_MODEL_NAME) or nil
+            targetModelLower2 = TARGET_MODEL_NAME2 ~= "" and string.lower(TARGET_MODEL_NAME2) or nil
+            clearFoundObjects()
+            createQuickNotification("🎯 Targets updated!", 2)
+        end
+    elseif msg == "/toggleui" then
+        toggleGUI()
+    elseif msg == "/testeffect" then
+        playFoundEffect()
+        createQuickNotification("✨ Testing effects!", 1.5)
+    elseif msg == "/autobring" then
+        autoTpEnabled = not autoTpEnabled
+        createQuickNotification("🔁 Auto-Bring: " .. (autoTpEnabled and "ON" or "OFF"), 1.5)
+    elseif msg == "/autoclick" then
+        autoClickEnabled = not autoClickEnabled
+        createQuickNotification("🖱️ Auto-Click: " .. (autoClickEnabled and "ON" or "OFF"), 1.5)
+    elseif msg == "/toggleflash" then
+        flashEffectsEnabled = not flashEffectsEnabled
+        createQuickNotification("⚡ Flash Effects: " .. (flashEffectsEnabled and "ON" or "OFF"), 1.5)
+    elseif msg == "/togglehighlight" then
+        highlightEnabled = not highlightEnabled
+        createQuickNotification("🔦 Highlight: " .. (highlightEnabled and "ON" or "OFF"), 1.5)
+    elseif msg == "/togglenotify" then
+        notificationsEnabled = not notificationsEnabled
+        createQuickNotification("📢 Notifications: " .. (notificationsEnabled and "ON" or "OFF"), 1.5)
+    elseif msg == "/antiafk" then
+        toggleAntiAfk()
+        createQuickNotification("🔄 Anti-AFK: " .. (antiAfkEnabled and "ENABLED" or "DISABLED"), 2)
+    end
+end)
+
+-- Startup
+print("🎯 Kill Noobs Simulator loaded!")
+print("💰 Target 1: " .. TARGET_PART_NAME)
+print("📦 Target 2: " .. (TARGET_PART_NAME2 ~= "" and TARGET_PART_NAME2 or "None"))
+print("🏢 Model Target 1: " .. (TARGET_MODEL_NAME ~= "" and TARGET_MODEL_NAME or "None"))
+print("⚡ Model Target 2: " .. (TARGET_MODEL_NAME2 ~= "" and TARGET_MODEL_NAME2 or "None"))
+print("⚡ Flash Effects: " .. (flashEffectsEnabled and "ENABLED" or "DISABLED"))
+print("🔦 Highlight: " .. (highlightEnabled and "ENABLED" or "DISABLED"))
+print("📢 Notifications: " .. (notificationsEnabled and "ENABLED" or "DISABLED"))
+print("🔄 Anti-AFK: " .. (antiAfkEnabled and "ENABLED" or "DISABLED"))
+print("🤖 Auto-Bring Money: " .. (autoBringMoney and "ENABLED" or "DISABLED"))
+print("🤖 Auto-Bring Crates: " .. (autoBringCrates and "ENABLED" or "DISABLED"))
+print("🤖 Auto-Bring Models: " .. (autoBringModels and "ENABLED" or "DISABLED"))
+print("🤖 Auto-Bring Upgrade Stations: " .. (autoBringModels2 and "ENABLED" or "DISABLED"))
+print("🔄 Upgrade Stations will return after 30 seconds")
+print("🎮 Commands: /bringmodel2, /toggleflash, /togglehighlight, /togglenotify, /antiafk")
+
+createControlGUI()
+setupCharacterEvents()
+task.spawn(autoClearCache)
+task.spawn(autoFunctionsLoop) -- Start auto-functions
+
+task.delay(2, function()
+    updateObjectCache()
+end)
+
+while true do
+    pcall(searchForObjects)
+    task.wait(CHECK_INTERVAL)
+end
